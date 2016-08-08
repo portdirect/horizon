@@ -246,6 +246,24 @@ class JSONView(View):
         self.add_resource_url('horizon:project:instances:detail', data)
         return data
 
+    def _get_k8s_pods(self, request):
+        # Get port data
+        try:
+            k8s_pods = api.neutron.port_list(request)
+        except Exception:
+            k8s_pods = []
+        data = []
+        for k8s_pod in k8s_pods:
+            if k8s_pod.device_owner == 'kuryr:container':
+                k8s_pod_data = {'name': k8s_pod.name,
+                               'status': self.trans.port[k8s_pod.status],
+                               'original_status': k8s_pod.status,
+                               'task': k8s_pod.status,
+                               'id': k8s_pod.id}
+                data.append(k8s_pod_data)
+        self.add_resource_url('horizon:project:networks:ports:detail', data)
+        return data
+
     def _get_networks(self, request):
         # Get neutron data
         # if we didn't specify tenant_id, all networks shown as admin user.
@@ -370,6 +388,7 @@ class JSONView(View):
 
     def get(self, request, *args, **kwargs):
         data = {'servers': self._get_servers(request),
+                'k8s_pods': self._get_k8s_pods(request),
                 'networks': self._get_networks(request),
                 'ports': self._get_ports(request),
                 'routers': self._get_routers(request)}
