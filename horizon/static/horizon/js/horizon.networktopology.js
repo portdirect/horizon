@@ -52,6 +52,19 @@ function Server(data) {
   this.ip_addresses = [];
 }
 
+function Kube_Pod(data) {
+  for (var key in data) {
+    if ({}.hasOwnProperty.call(data, key)) {
+      this[key] = data[key];
+    }
+  }
+  this.iconType = 'text';
+  this.icon = '\uf1b2'; // Cube
+  this.networks = [];
+  this.type = 'instance';
+  this.ip_addresses = [];
+}
+
 function listContains(obj, list) {
   // Function to help checking if an object is present on a list
   for (var i = 0; i < list.length; i++) {
@@ -92,6 +105,7 @@ horizon.network_topology = {
     self.data.networks = {};
     self.data.routers = {};
     self.data.servers = {};
+    self.data.k8s_pods = {};
     self.data.ports = {};
 
     // Setup balloon popups
@@ -301,6 +315,18 @@ horizon.network_topology = {
               _h.push([n.x + offset, n.y + offset]);
             }
           }
+        } else if (n.data instanceof Kube_Pod) {
+          _ref = n.data.networks;
+          for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+            net = _ref[_i];
+            if (net instanceof Network) {
+              _h = hulls[net.id] || (hulls[net.id] = []);
+              _h.push([n.x - offset, n.y - offset]);
+              _h.push([n.x - offset, n.y + offset]);
+              _h.push([n.x + offset, n.y - offset]);
+              _h.push([n.x + offset, n.y + offset]);
+            }
+          }
         } else if (n.data instanceof Network) {
           net = n.data;
           networkids[net.id] = n;
@@ -338,6 +364,12 @@ horizon.network_topology = {
       .gravity(grav)
       .linkDistance(function(d) {
         if (d.source.data instanceof Server || d.target.data instanceof Server) {
+          if (d.source.data.networks) {
+            return (dist * d.source.data.networks.length) + (5 * d.target.data.instances) + 20;
+          } else if (d.target.data.networks) {
+            return (dist * d.target.data.networks.length) + (5 * d.source.data.instances) + 20;
+          }
+        } else if (d.source.data instanceof Kube_Pod || d.target.data instanceof Kube_Pod) {
           if (d.source.data.networks) {
             return (dist * d.source.data.networks.length) + (5 * d.target.data.instances) + 20;
           } else if (d.target.data.networks) {
@@ -427,6 +459,8 @@ horizon.network_topology = {
             return 25;
           case Server.prototype:
             return 20;
+          case Kube_Pod.prototype:
+            return 15;
         }
       })
       .style('fill', 'white')
@@ -448,6 +482,8 @@ horizon.network_topology = {
               case Network.prototype:
                 return 'scale(1.5)';
               case Server.prototype:
+                return 'scale(1)';
+              case Kube_Pod.prototype:
                 return 'scale(1)';
             }
           });
@@ -487,6 +523,8 @@ horizon.network_topology = {
             return 'translate(30,3)';
           case Server.prototype:
             return 'translate(25,3)';
+          case Kube_Pod.prototype:
+            return 'translate(25,3)';
         }
       });
 
@@ -497,6 +535,12 @@ horizon.network_topology = {
         .style('font-size','20')
         .text('')
         .attr('transform', 'translate(26,38)');
+      nodeEnter.append('svg:text')
+        .attr('class','podCount')
+        .style('fill', 'black')
+        .style('font-size','20')
+        .text('')
+        .attr('transform', 'translate(10,38)');
     }
 
     nodeEnter.on('click', function(d) {
@@ -523,6 +567,7 @@ horizon.network_topology = {
   collapse_network: function(d, only_collapse) {
     var self = this;
     var server, vm;
+    var k8s_pod, pod;
 
     var filterNode = function(obj) {
       return function(d) {
@@ -542,9 +587,23 @@ horizon.network_topology = {
           }
         }
       }
+      var podCount = 0;
+      for (pod in self.data.k8s_pod) {
+        if (self.data.k8s_pod[pod] !== undefined) {
+          if (self.data.k8s_pod[pod].networks.length == 1) {
+            if (self.data.k8s_pod[pod].networks[0].id == d.data.id) {
+              podCount += 1;
+              self.removeNode(self.data.k8s_pod[pod]);
+            }
+          }
+        }
+      }
       d.data.collapsed = true;
       if (vmCount > 0) {
         self.vis.selectAll('.vmCount').filter(filterNode(d.data))[0][0].textContent = vmCount;
+      }
+      if (podCount > 0) {
+        self.vis.selectAll('.podCount').filter(filterNode(d.data))[0][0].textContent = podCount;
       }
     } else if (!only_collapse) {
       for (server in self.data.servers) {
@@ -561,8 +620,23 @@ horizon.network_topology = {
           }
         }
       }
+      for (k8s_pod in self.data.k8s_pods) {
+        if ({}.hasOwnProperty.call(self.data.k8s_pods, k8s_pod)) {
+          var _pod = self.data.k8s_pods[k8s_pod];
+          if (_pod !== undefined) {
+            if (_pod.networks.length === 1) {
+              if (_pod.networks[0].id == d.data.id) {
+                self.new_node(_pod, d.x, d.y);
+                self.new_link(self.find_by_id(_pod.id), self.find_by_id(d.data.id));
+                self.force.start();
+              }
+            }
+          }
+        }
+      }
       d.data.collapsed = false;
       self.vis.selectAll('.vmCount').filter(filterNode(d.data))[0][0].textContent = '';
+      self.vis.selectAll('.podCount').filter(filterNode(d.data))[0][0].textContent = '';
       var i = 0;
       while (i <= 100) {
         self.force.tick();
@@ -619,8 +693,12 @@ horizon.network_topology = {
 
   load_topology: function(data) {
     var self = this;
-    var net, _i, _netlen, _netref, rou, _j, _roulen, _rouref, port, _l, _portlen, _portref,
-        ser, _k, _serlen, _serref, obj, vmCount;
+    var net, _i, _netlen, _netref,
+        rou, _j, _roulen, _rouref,
+        port, _l, _portlen, _portref,
+        ser, _k, _serlen, _serref,
+        pod, _m, _podlen, _podref,
+        obj, vmCount, podCount;
     var change = false;
     var filterNode = function(obj) {
       return function(d) {
@@ -700,6 +778,32 @@ horizon.network_topology = {
       self.data.servers[server.id] = server;
     }
 
+    // Pod
+    _podref = data.k8s_pods;
+    for (_m = 0, _podlen = _podref.length; _m < _podlen; _m++) {
+      pod = _podref[_m];
+      var k8s_pod = new Kube_Pod(pod);
+      if (!self.already_in_graph(self.data.k8s_pods, k8s_pod)) {
+        self.new_node(k8s_pod);
+        change = true;
+      } else {
+        obj = self.find_by_id(k8s_pod.id);
+        if (obj) {
+          // Keep networks list
+          k8s_pod.networks = obj.data.networks;
+          // Keep ip address list
+          k8s_pod.ip_addresses = obj.data.ip_addresses;
+          obj.data = k8s_pod;
+        } else if (self.data.k8s_pods[k8s_pod.id] !== undefined) {
+          // This is used when servers are hidden because the network is
+          // collapsed
+            k8s_pod.networks = self.data.k8s_pods[k8s_pod.id].networks;
+            k8s_pod.ip_addresses = self.data.k8s_pods[k8s_pod.id].ip_addresses;
+        }
+      }
+      self.data.k8s_pods[k8s_pod.id] = k8s_pod;
+    }
+
     // Ports
     _portref = data.ports;
     for (_l = 0, _portlen = _portref.length; _l < _portlen; _l++) {
@@ -727,6 +831,28 @@ horizon.network_topology = {
                 self.removeNode(self.data.servers[port.device_id]);
                 vmCount = Number(self.vis.selectAll('.vmCount').filter(filterNode(_network.data))[0][0].textContent);
                 self.vis.selectAll('.vmCount').filter(filterNode(_network.data))[0][0].textContent = vmCount + 1;
+                continue;
+              }
+            }
+          } else if (port.device_owner == 'kuryr:container') {
+            _network.data.instances++;
+            device.data.networks.push(_network.data);
+            if (port.fixed_ips) {
+              for(var ip in port.fixed_ips) {
+                if (!listContains(port.fixed_ips[ip], device.data.ip_addresses)) {
+                  device.data.ip_addresses.push(port.fixed_ips[ip]);
+                }
+              }
+            }
+            // Remove the recently added node if connected to a network which is
+            // currently collapsed
+            if (_network.data.collapsed) {
+              if (device.data.networks.length == 1) {
+                self.data.k8s_pods[device.data.id].networks = device.data.networks;
+                self.data.k8s_pods[device.data.id].ip_addresses = device.data.ip_addresses;
+                self.removeNode(self.data.k8s_pods[port.device_id]);
+                podCount = Number(self.vis.selectAll('.podCount').filter(filterNode(_network.data))[0][0].textContent);
+                self.vis.selectAll('.podCount').filter(filterNode(_network.data))[0][0].textContent = podCount + 1;
                 continue;
               }
             }
@@ -759,6 +885,31 @@ horizon.network_topology = {
             }
             // Add back in first network link
             self.new_link(self.find_by_id(port.device_id), self.find_by_id(server.networks[0].id));
+            // Add new link
+            self.new_link(self.find_by_id(port.device_id), self.find_by_id(port.network_id));
+            change = true;
+          }
+        } else if (angular.isDefined(_network) && port.device_owner == 'kuryr:container') {
+          // Need to add a previously hidden node to the graph because it is
+          // connected to more than 1 network
+          if (_network.data.collapsed) {
+            k8s_pod = self.data.k8s_pods[port.device_id];
+            k8s_pod.networks.push(_network.data);
+            if (port.fixed_ips) {
+              for(var ip in port.fixed_ips) {
+                k8s_pod.ip_addresses.push(port.fixed_ips[ip]);
+              }
+            }
+            self.new_node(k8s_pod);
+            // decrease collapsed vm count on network
+            podCount = Number(self.vis.selectAll('.podCount').filter(filterNode(server.networks[0]))[0][0].textContent);
+            if (podCount == 1) {
+              self.vis.selectAll('.podCount').filter(filterNode(server.networks[0]))[0][0].textContent = '';
+            } else {
+              self.vis.selectAll('.podCount').filter(filterNode(server.networks[0]))[0][0].textContent = podCount - 1;
+            }
+            // Add back in first network link
+            self.new_link(self.find_by_id(port.device_id), self.find_by_id(k8s_pod.networks[0].id));
             // Add new link
             self.new_link(self.find_by_id(port.device_id), self.find_by_id(port.network_id));
             change = true;
@@ -854,6 +1005,10 @@ horizon.network_topology = {
       case 'instance':
         self.removeNode(self.data.servers[deviceId]);
         this.data.servers[deviceId] = undefined;
+        break;
+      case 'k8s_pod':
+        self.removeNode(self.data.k8s_pods[deviceId]);
+        this.data.k8s_pods[deviceId] = undefined;
         break;
       case 'network':
         self.removeNode(self.data.networks[deviceId]);
@@ -997,6 +1152,16 @@ horizon.network_topology = {
     } else if (d instanceof Server) {
       htmlData.delete_label = gettext('Delete Instance');
       htmlData.view_details_label = gettext('View Instance Details');
+      htmlData.console_id = d.id;
+      htmlData.ips = d.ip_addresses;
+      htmlData.console = d.console;
+      html = balloonTmpl.render(htmlData,{
+        table1:deviceTmpl,
+        table2:instanceTmpl
+      });
+    } else if (d instanceof Kube_Pod) {
+      htmlData.delete_label = gettext('Delete k8s Pod');
+      htmlData.view_details_label = gettext('View k8s Pod Details');
       htmlData.console_id = d.id;
       htmlData.ips = d.ip_addresses;
       htmlData.console = d.console;
